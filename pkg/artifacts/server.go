@@ -92,12 +92,30 @@ func safeResolve(baseDir string, relPath string) string {
 	return filepath.Join(baseDir, filepath.Clean(filepath.Join(string(os.PathSeparator), relPath)))
 }
 
+// requestBaseURL returns the externally visible scheme and host. Reverse proxies should
+// set X-Forwarded-Proto and X-Forwarded-Host; without those headers we use the
+// request's TLS state and Host header.
+func requestBaseURL(req *http.Request) string {
+	scheme := "http"
+	if req.TLS != nil {
+		scheme = "https"
+	}
+	if forwardedProto := strings.TrimSpace(strings.Split(req.Header.Get("X-Forwarded-Proto"), ",")[0]); forwardedProto == "http" || forwardedProto == "https" {
+		scheme = forwardedProto
+	}
+	host := req.Host
+	if forwardedHost := strings.TrimSpace(strings.Split(req.Header.Get("X-Forwarded-Host"), ",")[0]); forwardedHost != "" {
+		host = forwardedHost
+	}
+	return scheme + "://" + host
+}
+
 func uploads(router *httprouter.Router, baseDir string, fsys WriteFS) {
 	router.POST("/_apis/pipelines/workflows/:runId/artifacts", func(w http.ResponseWriter, req *http.Request, params httprouter.Params) {
 		runID := params.ByName("runId")
 
 		json, err := json.Marshal(FileContainerResourceURL{
-			FileContainerResourceURL: fmt.Sprintf("http://%s/upload/%s", req.Host, runID),
+			FileContainerResourceURL: fmt.Sprintf("%s/upload/%s", requestBaseURL(req), runID),
 		})
 		if err != nil {
 			panic(err)
@@ -190,7 +208,7 @@ func downloads(router *httprouter.Router, baseDir string, fsys fs.FS) {
 		for _, entry := range entries {
 			list = append(list, NamedFileContainerResourceURL{
 				Name:                     entry.Name(),
-				FileContainerResourceURL: fmt.Sprintf("http://%s/download/%s", req.Host, runID),
+				FileContainerResourceURL: fmt.Sprintf("%s/download/%s", requestBaseURL(req), runID),
 			})
 		}
 
@@ -231,7 +249,7 @@ func downloads(router *httprouter.Router, baseDir string, fsys fs.FS) {
 				files = append(files, ContainerItem{
 					Path:            path,
 					ItemType:        "file",
-					ContentLocation: fmt.Sprintf("http://%s/artifact/%s/%s/%s", req.Host, container, itemPath, rel),
+					ContentLocation: fmt.Sprintf("%s/artifact/%s/%s/%s", requestBaseURL(req), container, itemPath, rel),
 				})
 			}
 			return nil
