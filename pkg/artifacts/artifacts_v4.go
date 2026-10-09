@@ -135,11 +135,20 @@ func (c ArtifactContext) JSON(status int, _ ...interface{}) {
 }
 
 func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, int64, bool) {
-	runID, err := strconv.ParseInt(rawRunID, 10, 64)
-	if err != nil /* || task.Job.RunID != runID*/ {
-		log.Error("Error runID not match")
-		ctx.Error(http.StatusBadRequest, "run-id does not match")
+	// The Results API sends workflow_run_backend_id as a string. GitHub-hosted
+	// IDs are often numeric, but compatible services may use opaque IDs (for
+	// example UUIDs). Preserve the legacy numeric directory layout and map
+	// opaque IDs to a stable, filesystem-safe numeric key.
+	if rawRunID == "" {
+		log.Error("Error runID is empty")
+		ctx.Error(http.StatusBadRequest, "workflow_run_backend_id is required")
 		return nil, 0, false
+	}
+	runID, err := strconv.ParseInt(rawRunID, 10, 64)
+	if err != nil {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(rawRunID))
+		runID = int64(h.Sum64())
 	}
 	return nil, runID, true
 }
