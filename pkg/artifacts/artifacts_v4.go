@@ -161,7 +161,7 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 		prefix:  ArtifactV4RouteBase,
 	}
 	router.POST(path.Join(ArtifactV4RouteBase, "CreateArtifact"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.createArtifact(&ArtifactContext{
 			Req:  r,
 			Resp: w,
@@ -218,9 +218,12 @@ func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, tas
 
 func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID int64) string {
 	expires := time.Now().Add(60 * time.Minute).Format("2006-01-02 15:04:05.999999999 -0700 MST")
-	uploadURL := "http://" + strings.TrimSuffix(r.AppURL, "/") + strings.TrimSuffix(r.prefix, "/") +
+	baseURL := strings.TrimSuffix(r.AppURL, "/")
+	if baseURL == "" {
+		baseURL = "http://localhost"
+	}
+	return baseURL + strings.TrimSuffix(r.prefix, "/") +
 		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
-	return uploadURL
 }
 
 func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (int64, string, bool) {
@@ -310,9 +313,9 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 		return
 	}
 
-	comp := ctx.Req.URL.Query().Get("comp")
+	comp := strings.ToLower(ctx.Req.URL.Query().Get("comp"))
 	switch comp {
-	case "block", "appendBlock":
+	case "block", "appendblock":
 
 		safeRunPath := safeResolve(r.baseDir, fmt.Sprint(task))
 		safePath := safeResolve(safeRunPath, artifactName)
@@ -341,7 +344,13 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 		file.Close()
 		ctx.JSON(http.StatusCreated, "appended")
 	case "blocklist":
+		// The Azure Blob-compatible upload protocol uses "blockList" (camel
+		// case) in some clients. Query parameter values are case-sensitive, so
+		// normalize above and accept both spellings.
 		ctx.JSON(http.StatusCreated, "created")
+	default:
+		log.Errorf("Unsupported artifact upload operation: comp=%q path=%s", ctx.Req.URL.Query().Get("comp"), ctx.Req.URL.Path)
+		ctx.Error(http.StatusBadRequest, "unsupported artifact upload operation")
 	}
 }
 
