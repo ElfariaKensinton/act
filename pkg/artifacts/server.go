@@ -301,9 +301,16 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 		return cancel
 	}
 
+	absoluteArtifactPath, err := filepath.Abs(artifactPath)
+	if err != nil {
+		logger.Errorf("Could not resolve artifact storage path %q: %v", artifactPath, err)
+		return cancel
+	}
+	artifactPath = absoluteArtifactPath
+
 	router := httprouter.New()
 
-	logger.Debugf("Artifacts base path '%s'", artifactPath)
+	logger.Infof("Artifacts base path: %s", artifactPath)
 	fsys := readWriteFSImpl{}
 	uploads(router, artifactPath, fsys)
 	downloads(router, artifactPath, fsys)
