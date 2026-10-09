@@ -24,3 +24,9 @@ jobs:
         run: go build ./...
       - name: Build artifact server binary
         run: go build -v -o artifact-server ./cmd/artifact-server
+      - name: Upload artifact server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-server-linux-amd64
+          path: artifact-server
+          if-no-files-found: error
