@@ -18,6 +18,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	artifacts.Serve(ctx, *dir, *addr, *port)
+	cancel := artifacts.Serve(ctx, *dir, *addr, *port)
 	<-ctx.Done()
+	cancel()
 }
