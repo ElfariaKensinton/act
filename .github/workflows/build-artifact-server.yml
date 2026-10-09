@@ -24,10 +24,6 @@ jobs:
         run: go build ./...
       - name: Build Linux binary
         run: go build -v -o artifact-server-linux-amd64 ./cmd/artifact-server
-      - name: Build macOS Apple Silicon binary
-        env:
-          GOOS: darwin
-          GOARCH: arm64
       - name: Build macOS Intel binary
         env:
           GOOS: darwin
