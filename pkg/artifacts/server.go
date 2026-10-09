@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -293,6 +296,115 @@ func downloads(router *httprouter.Router, baseDir string, fsys fs.FS) {
 	})
 }
 
+type localArtifactFile struct {
+	Name         string
+	RunID        string
+	RelativePath string
+	Size         int64
+	ModTime      time.Time
+}
+
+// localArtifactsPage exposes a small browser UI for artifacts stored by this
+// standalone server. It does not register remote files in GitHub's own artifact
+// catalogue; it makes locally stored files discoverable and downloadable.
+func localArtifactsPage(root string, w http.ResponseWriter, _ *http.Request) {
+	files := make([]localArtifactFile, 0)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		runID := ""
+		if len(parts) > 1 {
+			runID = parts[0]
+		}
+		files = append(files, localArtifactFile{
+			Name:         strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
+			RunID:        runID,
+			RelativePath: filepath.ToSlash(rel),
+			Size:         info.Size(),
+			ModTime:      info.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "could not list local artifacts", http.StatusInternalServerError)
+		return
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime.After(files[j].ModTime)
+	})
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Local Actions Artifacts</title><style>
+:root{color-scheme:light dark}body{font:15px system-ui,-apple-system,sans-serif;max-width:1050px;margin:40px auto;padding:0 20px}h1{font-size:25px}p{opacity:.75}.path{font-family:ui-monospace,monospace;font-size:12px;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;margin-top:24px}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid #8885}th{opacity:.7}a{color:inherit} .size{white-space:nowrap}@media(max-width:650px){.run{display:none}}
+</style></head><body><h1>Locally stored workflow artifacts</h1><p>Files are stored on this runner. This page is separate from GitHub's built-in Actions → Artifacts list.</p>`)
+	if len(files) == 0 {
+		b.WriteString("<p>No ZIP artifacts found.</p>")
+	} else {
+		b.WriteString("<table><thead><tr><th>Artifact</th><th class=\"run\">Run key</th><th>Size</th><th>Updated</th></tr></thead><tbody>")
+		for _, file := range files {
+			b.WriteString("<tr><td><a href=\"/local-artifacts/download?path=")
+			b.WriteString(template.HTMLEscapeString(url.QueryEscape(file.RelativePath)))
+			b.WriteString("\">")
+			b.WriteString(template.HTMLEscapeString(file.Name))
+			b.WriteString("</a><div class=\"path\">")
+			b.WriteString(template.HTMLEscapeString(file.RelativePath))
+			b.WriteString("</div></td><td class=\"run\">")
+			b.WriteString(template.HTMLEscapeString(file.RunID))
+			b.WriteString("</td><td class=\"size\">")
+			b.WriteString(fmt.Sprintf("%.2f MiB", float64(file.Size)/(1024*1024)))
+			b.WriteString("</td><td>")
+			b.WriteString(template.HTMLEscapeString(file.ModTime.Local().Format("2006-01-02 15:04:05")))
+			b.WriteString("</td></tr>")
+		}
+		b.WriteString("</tbody></table>")
+	}
+	b.WriteString("</body></html>")
+	_, _ = io.WriteString(w, b.String())
+}
+
+func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request) {
+	rel := filepath.Clean(filepath.FromSlash(req.URL.Query().Get("path")))
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		http.Error(w, "invalid artifact path", http.StatusBadRequest)
+		return
+	}
+	full := filepath.Join(root, rel)
+	within, err := filepath.Rel(root, full)
+	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(os.PathSeparator)) {
+		http.Error(w, "invalid artifact path", http.StatusBadRequest)
+		return
+	}
+	file, err := os.Open(full)
+	if err != nil {
+		http.Error(w, "artifact not found", http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.Error(w, "artifact not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Length", fmt.Sprint(info.Size()))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(full)}))
+	http.ServeContent(w, req, filepath.Base(full), info.ModTime(), file)
+}
+
 func Serve(ctx context.Context, artifactPath string, addr string, port string) context.CancelFunc {
 	serverContext, cancel := context.WithCancel(ctx)
 	logger := common.Logger(serverContext)
@@ -309,6 +421,15 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 	artifactPath = absoluteArtifactPath
 
 	router := httprouter.New()
+	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		localArtifactsPage(artifactPath, w, r)
+	})
+	router.GET("/artifacts", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		localArtifactsPage(artifactPath, w, r)
+	})
+	router.GET("/local-artifacts/download", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		downloadLocalArtifact(artifactPath, w, r)
+	})
 
 	logger.Infof("Artifacts base path: %s", artifactPath)
 	fsys := readWriteFSImpl{}
