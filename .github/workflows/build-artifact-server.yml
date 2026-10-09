@@ -22,11 +22,37 @@ jobs:
         run: go test ./pkg/artifacts/...
       - name: Compile all packages
         run: go build ./...
-      - name: Build artifact server binary
-        run: go build -v -o artifact-server ./cmd/artifact-server
-      - name: Upload artifact server binary
+      - name: Build Linux binary
+        run: go build -v -o artifact-server-linux-amd64 ./cmd/artifact-server
+      - name: Build macOS Apple Silicon binary
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+      - name: Build macOS Intel binary
+        env:
+          GOOS: darwin
+          GOARCH: amd64
+        run: go build -v -o artifact-server-darwin-amd64 ./cmd/artifact-server
+      - name: Build macOS Apple Silicon binary
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -v -o artifact-server-darwin-arm64 ./cmd/artifact-server
+      - name: Upload Linux binary
         uses: actions/upload-artifact@v4
         with:
           name: artifact-server-linux-amd64
-          path: artifact-server
+          path: artifact-server-linux-amd64
+          if-no-files-found: error
+      - name: Upload macOS Intel binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-server-darwin-amd64
+          path: artifact-server-darwin-amd64
+          if-no-files-found: error
+      - name: Upload macOS Apple Silicon binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-server-darwin-arm64
+          path: artifact-server-darwin-arm64
           if-no-files-found: error
