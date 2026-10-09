@@ -180,14 +180,14 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 		})
 	})
 	router.POST(path.Join(ArtifactV4RouteBase, "GetSignedArtifactURL"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.getSignedArtifactURL(&ArtifactContext{
 			Req:  r,
 			Resp: w,
 		})
 	})
 	router.POST(path.Join(ArtifactV4RouteBase, "DeleteArtifact"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.deleteArtifact(&ArtifactContext{
 			Req:  r,
 			Resp: w,
@@ -294,11 +294,17 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 	file, err := r.fs.OpenWritable(safePath)
-
 	if err != nil {
-		panic(err)
+		log.Errorf("CreateArtifact could not prepare storage: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, artifactName, safePath, err)
+		ctx.Error(http.StatusInternalServerError, "could not prepare artifact storage")
+		return
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		log.Errorf("CreateArtifact could not close storage: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, artifactName, safePath, err)
+		ctx.Error(http.StatusInternalServerError, "could not prepare artifact storage")
+		return
+	}
+	log.Infof("Artifact upload initialized: run_id=%q artifact=%q path=%q", req.WorkflowRunBackendId, artifactName, safePath)
 
 	respData := CreateArtifactResponse{
 		Ok:              true,
@@ -337,11 +343,18 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 			panic(errors.New("No body given"))
 		}
 
-		_, err = io.Copy(writer, ctx.Req.Body)
+		n, err := io.Copy(writer, ctx.Req.Body)
 		if err != nil {
-			panic(err)
+			log.Errorf("Artifact upload failed: run/task=%d artifact=%q comp=%q: %v", task, artifactName, comp, err)
+			ctx.Error(http.StatusInternalServerError, "artifact upload failed")
+			return
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			log.Errorf("Artifact upload close failed: run/task=%d artifact=%q comp=%q: %v", task, artifactName, comp, err)
+			ctx.Error(http.StatusInternalServerError, "artifact upload failed")
+			return
+		}
+		log.Infof("Artifact upload stored: task=%d artifact=%q comp=%q bytes=%d", task, artifactName, comp, n)
 		ctx.JSON(http.StatusCreated, "appended")
 	case "blocklist":
 		// The Azure Blob-compatible upload protocol uses "blockList" (camel
