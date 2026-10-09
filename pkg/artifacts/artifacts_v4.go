@@ -360,6 +360,7 @@ func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 		// The Azure Blob-compatible upload protocol uses "blockList" (camel
 		// case) in some clients. Query parameter values are case-sensitive, so
 		// normalize above and accept both spellings.
+		log.Infof("Artifact upload blocks committed: task=%d artifact=%q", task, artifactName)
 		ctx.JSON(http.StatusCreated, "created")
 	default:
 		log.Errorf("Unsupported artifact upload operation: comp=%q path=%s", ctx.Req.URL.Query().Get("comp"), ctx.Req.URL.Path)
@@ -373,9 +374,26 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, _, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
+	}
+
+	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(runID))
+	safePath := safeResolve(safeRunPath, req.Name)
+	safePath = safeResolve(safePath, req.Name+".zip")
+	file, err := r.rfs.Open(safePath)
+	if err != nil {
+		log.Errorf("Artifact finalize failed: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, req.Name, safePath, err)
+		ctx.Error(http.StatusNotFound, "uploaded artifact file not found")
+		return
+	}
+	info, statErr := file.Stat()
+	_ = file.Close()
+	if statErr != nil {
+		log.Errorf("Artifact finalize could not stat file: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, req.Name, safePath, statErr)
+	} else {
+		log.Infof("Artifact upload finalized: run_id=%q artifact=%q stored_bytes=%d declared_size=%d", req.WorkflowRunBackendId, req.Name, info.Size(), req.Size)
 	}
 
 	respData := FinalizeArtifactResponse{
@@ -384,7 +402,6 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
 	}
 	r.sendProtbufBody(ctx, &respData)
 }
-
 func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
 	var req ListArtifactsRequest
 
