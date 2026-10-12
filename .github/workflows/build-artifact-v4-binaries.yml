@@ -1,0 +1,39 @@
+name: Build act binaries for artifact v4 patch
+
+on:
+  push:
+    branches:
+      - build/act-binaries-9a451f2
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test artifact package
+        run: go test ./pkg/artifacts/...
+      - name: Build all packages
+        run: go build ./...
+      - name: Build CLI binaries
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -eu
+          mkdir -p dist
+          go build -o dist/act-linux-amd64 .
+          GOOS=darwin GOARCH=amd64 go build -o dist/act-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o dist/act-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/act-windows-amd64.exe .
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: act-binaries-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
