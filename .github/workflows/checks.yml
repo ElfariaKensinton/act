@@ -86,6 +86,36 @@ jobs:
           paths: 'unit-tests.xml'
         if: always()
 
+  build-patch-binaries:
+    name: Build binaries for artifact v4 patch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test artifact package
+        run: go test ./pkg/artifacts/...
+      - name: Build current-platform packages
+        run: go build ./...
+      - name: Build Linux, macOS, and Windows binaries
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -eu
+          mkdir -p dist
+          go build -o dist/act-linux-amd64 .
+          GOOS=darwin GOARCH=amd64 go build -o dist/act-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o dist/act-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/act-windows-amd64.exe .
+      - name: Upload exact source binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: act-patch-binaries-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+
   snapshot:
     name: snapshot
     runs-on: ubuntu-latest
