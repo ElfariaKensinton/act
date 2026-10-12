@@ -84,7 +84,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
