@@ -425,6 +425,14 @@ func (r *artifactV4Routes) commitBlockList(ctx *ArtifactContext, taskID int64, a
 		return
 	}
 
+	// Close staged block files before removing the temporary directory. This
+	// also permits cleanup on platforms that do not allow deleting open files.
+	for _, block := range blockFiles {
+		if err := block.Close(); err != nil {
+			log.Warnf("Artifact block close after commit failed: task=%d artifact=%q: %v", taskID, artifactName, err)
+		}
+	}
+	blockFiles = nil
 	if remover, ok := r.fs.(artifactRemover); ok {
 		_ = remover.RemoveAll(artifactV4BlockDir(r.baseDir, taskID, artifactName))
 	}
