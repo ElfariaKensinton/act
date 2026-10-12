@@ -73,6 +73,10 @@ func (fwfs readWriteFSImpl) OpenWritable(name string) (WritableFile, error) {
 	return os.OpenFile(name, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
 }
 
+func (fwfs readWriteFSImpl) RemoveAll(name string) error {
+	return os.RemoveAll(name)
+}
+
 func (fwfs readWriteFSImpl) OpenAppendable(name string) (WritableFile, error) {
 	if err := os.MkdirAll(filepath.Dir(name), os.ModePerm); err != nil {
 		return nil, err
