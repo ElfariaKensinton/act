@@ -91,7 +91,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -134,12 +133,16 @@ func (c ArtifactContext) JSON(status int, _ ...interface{}) {
 	c.Resp.WriteHeader(status)
 }
 
-func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, int64, bool) {
-	runID, err := strconv.ParseInt(rawRunID, 10, 64)
-	if err != nil /* || task.Job.RunID != runID*/ {
-		log.Error("Error runID not match")
-		ctx.Error(http.StatusBadRequest, "run-id does not match")
-		return nil, 0, false
+// validateRunIDV4 accepts any non-empty run id. GitHub-hosted runners send
+// workflow_run_backend_id as a GUID, not a number, so it must not be parsed as
+// an integer. The value is only ever used as a directory name (through
+// safeResolve) and inside the signed url.
+func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, string, bool) {
+	runID := strings.TrimSpace(rawRunID)
+	if runID == "" {
+		log.Error("Error runID is empty")
+		ctx.Error(http.StatusBadRequest, "run-id is empty")
+		return nil, "", false
 	}
 	return nil, runID, true
 }
@@ -198,41 +201,40 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 	})
 }
 
-func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, taskID int64) []byte {
+func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, taskID string) []byte {
 	mac := hmac.New(sha256.New, []byte{0xba, 0xdb, 0xee, 0xf0})
 	mac.Write([]byte(endp))
 	mac.Write([]byte(expires))
 	mac.Write([]byte(artifactName))
-	mac.Write([]byte(fmt.Sprint(taskID)))
+	mac.Write([]byte(taskID))
 	return mac.Sum(nil)
 }
 
-func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID int64) string {
+func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID string) string {
 	expires := time.Now().Add(60 * time.Minute).Format("2006-01-02 15:04:05.999999999 -0700 MST")
 	uploadURL := "http://" + strings.TrimSuffix(r.AppURL, "/") + strings.TrimSuffix(r.prefix, "/") +
-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
+		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + url.QueryEscape(taskID)
 	return uploadURL
 }
 
-func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (int64, string, bool) {
-	rawTaskID := ctx.Req.URL.Query().Get("taskID")
+func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (string, string, bool) {
+	taskID := ctx.Req.URL.Query().Get("taskID")
 	sig := ctx.Req.URL.Query().Get("sig")
 	expires := ctx.Req.URL.Query().Get("expires")
 	artifactName := ctx.Req.URL.Query().Get("artifactName")
 	dsig, _ := base64.URLEncoding.DecodeString(sig)
-	taskID, _ := strconv.ParseInt(rawTaskID, 10, 64)
 
 	expecedsig := r.buildSignature(endp, expires, artifactName, taskID)
 	if !hmac.Equal(dsig, expecedsig) {
 		log.Error("Error unauthorized")
 		ctx.Error(http.StatusUnauthorized, "Error unauthorized")
-		return -1, "", false
+		return "", "", false
 	}
 	t, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", expires)
 	if err != nil || t.Before(time.Now()) {
 		log.Error("Error link expired")
 		ctx.Error(http.StatusUnauthorized, "Error link expired")
-		return -1, "", false
+		return "", "", false
 	}
 	return taskID, artifactName, true
 }
