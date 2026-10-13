@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -315,6 +316,52 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 
 		fmt.Println("::endgroup::")
 	})
+}
+
+func TestCreateArtifactV4IgnoresUnknownFields(t *testing.T) {
+	assert := assert.New(t)
+
+	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	router := httprouter.New()
+	RoutesV4(router, "artifact/server/path", writeMapFS{memfs}, memfs)
+
+	// upload-artifact@v7+ sends mime_type, which the vendored protobuf doesn't
+	// consume. The server must ignore it instead of rejecting CreateArtifact.
+	body := `{"workflow_run_backend_id":"1","workflow_job_run_backend_id":"1","name":"test","version":4,"mime_type":"application/zip"}`
+	req, _ := http.NewRequest("POST", "http://localhost"+path.Join(ArtifactV4RouteBase, "CreateArtifact"), strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	assert.Equal(http.StatusOK, rr.Code)
+	response := CreateArtifactResponse{}
+	err := json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.Nil(err)
+	assert.True(response.Ok)
+}
+
+func TestUploadArtifactV4AcceptsUnpaddedSignature(t *testing.T) {
+	assert := assert.New(t)
+
+	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+	router := httprouter.New()
+	RoutesV4(router, "artifact/server/path", writeMapFS{memfs}, memfs)
+
+	// Generate a valid upload URL, then reproduce upload-artifact@v7+'s
+	// Azure SDK stripping '=' padding from the sig query value.
+	signer := artifactV4Routes{prefix: ArtifactV4RouteBase, AppURL: "localhost"}
+	signedURL := signer.buildArtifactURL("UploadArtifact", "test", "1")
+	parsed, err := url.Parse(signedURL)
+	assert.Nil(err)
+	q := parsed.Query()
+	q.Set("sig", strings.TrimRight(q.Get("sig"), "="))
+	q.Set("comp", "block")
+	parsed.RawQuery = q.Encode()
+
+	req, _ := http.NewRequest("PUT", parsed.String(), strings.NewReader("content"))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+
+	assert.Equal(http.StatusCreated, rr.Code)
 }
 
 func TestMkdirFsImplSafeResolve(t *testing.T) {
