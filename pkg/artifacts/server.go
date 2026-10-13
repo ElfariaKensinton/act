@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -381,6 +382,146 @@ func localArtifactsPage(root string, w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
+
+type localArtifactSummaryRow struct {
+	Name         string
+	RelativePath string
+	SizeText     string
+	Digest       string
+	DigestFull   string
+}
+
+// localArtifactsSummaryPage serves the styled artifact table as a real HTML page.
+// GitHub strips style attributes from job summaries, so the custom card must be
+// rendered by the artifact server rather than embedded directly in GITHUB_STEP_SUMMARY.
+func localArtifactsSummaryPage(root string, w http.ResponseWriter, req *http.Request) {
+	runID := strings.TrimSpace(req.URL.Query().Get("runId"))
+	if runID == "" {
+		http.Error(w, "runId is required", http.StatusBadRequest)
+		return
+	}
+
+	rows := make([]localArtifactSummaryRow, 0)
+	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, filePath)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		parts := strings.Split(rel, "/")
+		if len(parts) < 3 || parts[0] != runID {
+			return nil
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		archive, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, archive)
+		closeErr := archive.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+
+		digestFull := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+		digest := digestFull
+		hexStart := strings.Index(digestFull, ":") + 1
+		if len(digestFull)-hexStart > 8 {
+			digest = digestFull[:hexStart+8] + "…"
+		}
+
+		rows = append(rows, localArtifactSummaryRow{
+			Name:         strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())),
+			RelativePath: rel,
+			SizeText:     formatLocalArtifactSize(info.Size()),
+			Digest:       digest,
+			DigestFull:   digestFull,
+		})
+		return nil
+	})
+	if err != nil {
+		http.Error(w, "could not list local artifacts", http.StatusInternalServerError)
+		return
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Name < rows[j].Name
+	})
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	var b strings.Builder
+	b.WriteString("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Artifacts</title></head><body style=\"margin: 24px;\">")
+	b.WriteString("<div style=\"border: 1px solid #d0d7de; border-radius: 6px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background-color: #ffffff; color: #24292f; max-width: 900px;\">")
+	b.WriteString("<div style=\"padding: 16px;\">")
+	b.WriteString("<h2 style=\"margin: 0; font-size: 16px; font-weight: 600;\">Artifacts</h2>")
+	b.WriteString("<p style=\"margin: 4px 0 24px 0; font-size: 14px; color: #57606a;\">Produced during runtime</p>")
+	b.WriteString("<table style=\"width: 100%; border-collapse: collapse; text-align: left; font-size: 14px;\">")
+	b.WriteString("<thead><tr>")
+	b.WriteString("<th style=\"padding: 8px 16px 16px 16px; color: #57606a; font-weight: 600; width: 45%;\">Name</th>")
+	b.WriteString("<th style=\"padding: 8px 16px 16px 16px; color: #57606a; font-weight: 600; width: 20%;\">Size</th>")
+	b.WriteString("<th style=\"padding: 8px 16px 16px 16px; color: #57606a; font-weight: 600;\">Digest</th>")
+	b.WriteString("<th style=\"padding: 8px 16px 16px 16px;\"></th>")
+	b.WriteString("</tr></thead><tbody>")
+
+	if len(rows) == 0 {
+		b.WriteString("<tr style=\"border-top: 1px solid #d0d7de;\"><td colspan=\"4\" style=\"padding: 16px; color: #57606a;\">No artifacts found for this run.</td></tr>")
+	}
+
+	packageIcon := "<svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" style=\"color: #57606a; flex-shrink: 0; min-width: 16px;\"><path d=\"M1.75 4.75L8 1.5L14.25 4.75V11.25L8 14.5L1.75 11.25V4.75Z\" /><path d=\"M1.75 4.75L8 8L14.25 4.75\" /><path d=\"M8 8V14.5\" /></svg>"
+	for _, row := range rows {
+		href := "/local-artifacts/download?path=" + url.QueryEscape(row.RelativePath)
+		escapedHref := template.HTMLEscapeString(href)
+		escapedName := template.HTMLEscapeString(row.Name)
+		escapedDigest := template.HTMLEscapeString(row.Digest)
+		escapedDigestFull := template.HTMLEscapeString(row.DigestFull)
+
+		b.WriteString("<tr style=\"border-top: 1px solid #d0d7de;\">")
+		b.WriteString("<td style=\"padding: 16px; font-weight: 600;\"><div style=\"display: flex; align-items: center; gap: 8px;\">")
+		b.WriteString("<a href=\"" + escapedHref + "\" style=\"color: #24292f; text-decoration: none; cursor: pointer;\">" + packageIcon + "</a>")
+		b.WriteString("<a href=\"" + escapedHref + "\" style=\"color: #24292f; text-decoration: none; cursor: pointer; word-break: break-all;\">" + escapedName + "</a>")
+		b.WriteString("</div></td>")
+		b.WriteString("<td style=\"padding: 16px;\">" + template.HTMLEscapeString(row.SizeText) + "</td>")
+		b.WriteString("<td style=\"padding: 16px;\"><div style=\"display: flex; align-items: center; gap: 8px;\">")
+		b.WriteString("<span title=\"" + escapedDigestFull + "\" style=\"font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px;\">" + escapedDigest + "</span>")
+		b.WriteString("<button type=\"button\" data-copy-digest=\"" + escapedDigestFull + "\" title=\"Copy digest\" aria-label=\"Copy digest\" style=\"border: 0; padding: 0; background: transparent; display: inline-flex; align-items: center; cursor: pointer;\"><img src=\"/local-artifacts/icon/copy.svg\" alt=\"Copy digest\" width=\"16\" height=\"16\" /></button>")
+		b.WriteString("</div></td>")
+		b.WriteString("<td style=\"padding: 16px; text-align: right; color: #57606a;\"><div style=\"display: flex; align-items: center; justify-content: flex-end; gap: 16px;\">")
+		b.WriteString("<a href=\"" + escapedHref + "\" title=\"Download artifact\" style=\"cursor: pointer;\"><img src=\"/local-artifacts/icon/download.svg\" alt=\"Download\" width=\"16\" height=\"16\" /></a>")
+		b.WriteString("<span title=\"Delete\" aria-label=\"Delete\"><img src=\"/local-artifacts/icon/trash.svg\" alt=\"Delete\" width=\"16\" height=\"16\" /></span>")
+		b.WriteString("</div></td></tr>")
+	}
+	b.WriteString("</tbody></table></div></div>")
+	b.WriteString("<script>document.addEventListener(\"click\",function(event){var button=event.target.closest(\"[data-copy-digest]\");if(!button)return;var digest=button.getAttribute(\"data-copy-digest\");if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(digest).then(function(){button.title=\"Copied\";});}});</script>")
+	b.WriteString("</body></html>")
+	_, _ = io.WriteString(w, b.String())
+}
+
+func formatLocalArtifactSize(bytes int64) string {
+	if bytes >= 1024*1024 {
+		return fmt.Sprintf("%.2f MB", float64(bytes)/(1024*1024))
+	}
+	if bytes >= 1024 {
+		return fmt.Sprintf("%.2f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%d B", bytes)
+}
+
 // localArtifactIcons are Primer Octicons (16px) used by the job summary table
 // that the runner writes. GitHub renders summary images through its image proxy,
 // which needs a public URL that answers with an image content type.
@@ -467,6 +608,9 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 	})
 	router.GET("/local-artifacts/download", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		downloadLocalArtifact(artifactPath, w, r)
+	})
+	router.GET("/local-artifacts/summary", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		localArtifactsSummaryPage(artifactPath, w, r)
 	})
 	router.GET("/local-artifacts/icon/:name", localArtifactIcon)
 
