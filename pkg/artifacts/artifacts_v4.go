@@ -222,10 +222,7 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (st
 	sig := ctx.Req.URL.Query().Get("sig")
 	expires := ctx.Req.URL.Query().Get("expires")
 	artifactName := ctx.Req.URL.Query().Get("artifactName")
-	// upload-artifact@v7+ strips base64 padding from the signed URL when the
-	// Azure SDK appends block-upload query parameters. Trim any remaining padding
-	// and use RawURLEncoding so padded and unpadded signatures are both accepted.
-	dsig, _ := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig, "="))
+	dsig, _ := base64.URLEncoding.DecodeString(sig)
 
 	expecedsig := r.buildSignature(endp, expires, artifactName, taskID)
 	if !hmac.Equal(dsig, expecedsig) {
@@ -249,10 +246,7 @@ func (r *artifactV4Routes) parseProtbufBody(ctx *ArtifactContext, req protorefle
 		ctx.Error(http.StatusInternalServerError, "Error decode request body")
 		return false
 	}
-	// Newer upload-artifact releases may add optional request fields (such as
-	// mime_type) that this server doesn't consume. Ignore those fields so older
-	// vendored protobuf definitions remain forward-compatible.
-	err = protojson.UnmarshalOptions{DiscardUnknown: true}.Unmarshal(body, req)
+	err = protojson.Unmarshal(body, req)
 	if err != nil {
 		log.Errorf("Error decode request body: %v", err)
 		ctx.Error(http.StatusInternalServerError, "Error decode request body")
