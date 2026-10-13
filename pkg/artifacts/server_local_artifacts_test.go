@@ -1,11 +1,14 @@
 package artifacts
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/julienschmidt/httprouter"
 )
 
 func TestLocalArtifactsPageListsZipFiles(t *testing.T) {
@@ -63,5 +66,34 @@ func TestDownloadLocalArtifactRejectsTraversal(t *testing.T) {
 
 	if rec.Code != 400 {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+
+func TestDownloadLocalArtifactMapsOpaqueRunID(t *testing.T) {
+	root := t.TempDir()
+	const backendID = "62f0f060-0000-4000-8000-123456789abc"
+	artifact := filepath.Join(root, fmt.Sprint(runKeyFromBackendID(backendID)), "app", "app.zip")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("zip payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/local-artifacts/download?path="+backendID+"%2Fapp%2Fapp.zip", nil)
+	rec := httptest.NewRecorder()
+	downloadLocalArtifact(root, rec, req)
+
+	if rec.Code != 200 || rec.Body.String() != "zip payload" {
+		t.Fatalf("status = %d body = %q, want 200 zip payload", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLocalArtifactIconServesSVG(t *testing.T) {
+	rec := httptest.NewRecorder()
+	localArtifactIcon(rec, httptest.NewRequest("GET", "/local-artifacts/icon/download.svg", nil), httprouter.Params{{Key: "name", Value: "download.svg"}})
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/svg+xml" || !strings.HasPrefix(rec.Body.String(), "<svg") {
+		t.Fatalf("status = %d type = %q body = %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
 }
