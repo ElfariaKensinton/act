@@ -99,3 +99,47 @@ func TestArtifactV4BlockRetryIsIdempotent(t *testing.T) {
 		t.Fatalf("staged block directory should be removed after commit; stat error = %v", err)
 	}
 }
+
+func TestArtifactV4IgnoresUnknownFields(t *testing.T) {
+	body := `{"workflow_run_backend_id":"1","workflow_job_run_backend_id":"1","name":"test","version":4,"mime_type":"application/zip"}`
+	req := httptest.NewRequest(http.MethodPost, ArtifactV4RouteBase+"/CreateArtifact", strings.NewReader(body))
+	resp := httptest.NewRecorder()
+
+	var decoded CreateArtifactRequest
+	routes := &artifactV4Routes{}
+	if ok := routes.parseProtbufBody(&ArtifactContext{Req: req, Resp: resp}, &decoded); !ok {
+		t.Fatalf("parseProtbufBody rejected an unknown optional field: status %d", resp.Code)
+	}
+	if decoded.Name != "test" || decoded.Version != 4 {
+		t.Fatalf("decoded request = name %q, version %d; want name %q, version 4", decoded.Name, decoded.Version, "test")
+	}
+}
+
+func TestArtifactV4AcceptsUnpaddedSignature(t *testing.T) {
+	baseDir := t.TempDir()
+	storage := readWriteFSImpl{}
+	routes := &artifactV4Routes{
+		prefix:  ArtifactV4RouteBase,
+		fs:      storage,
+		rfs:     storage,
+		AppURL:  "http://localhost",
+		baseDir: baseDir,
+	}
+	signedURL := routes.buildArtifactURL("UploadArtifact", "sample", 123)
+	parsed, err := url.Parse(signedURL)
+	if err != nil {
+		t.Fatalf("parsing signed URL: %v", err)
+	}
+	q := parsed.Query()
+	q.Set("sig", strings.TrimRight(q.Get("sig"), "="))
+	q.Set("comp", "block")
+	q.Set("blockid", base64.StdEncoding.EncodeToString([]byte("block-one")))
+	parsed.RawQuery = q.Encode()
+
+	req := httptest.NewRequest(http.MethodPut, parsed.String(), strings.NewReader("content"))
+	resp := httptest.NewRecorder()
+	routes.uploadArtifact(&ArtifactContext{Req: req, Resp: resp})
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("upload with unpadded signature status = %d, want %d; body: %s", resp.Code, http.StatusCreated, resp.Body.String())
+	}
+}
