@@ -381,6 +381,23 @@ func localArtifactsPage(root string, w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
+// artifactNameLabelSVG serves a simple SVG text label for GitHub job summaries.
+ // Rendering the artifact name as an image avoids GitHub's Markdown sanitizer removing
+ // inline CSS from links, which otherwise leaves filenames blue and underlined.
+func artifactNameLabelSVG(w http.ResponseWriter, req *http.Request) {
+	name := strings.TrimSpace(req.URL.Query().Get("name"))
+	if name == "" {
+		name = "artifact"
+	}
+	width := len([]rune(name))*9 + 6
+	escapedName := template.HTMLEscapeString(name)
+	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = fmt.Fprintf(w,
+		`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="18" viewBox="0 0 %d 18"><text x="0" y="13" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#000">%s</text></svg>`,
+		width, width, escapedName)
+}
+
 func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request) {
 	rel := filepath.Clean(filepath.FromSlash(req.URL.Query().Get("path")))
 	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
@@ -434,6 +451,9 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 	})
 	router.GET("/local-artifacts/download", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		downloadLocalArtifact(artifactPath, w, r)
+	})
+	router.GET("/local-artifacts/name.svg", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		artifactNameLabelSVG(w, r)
 	})
 
 	logger.Infof("Artifacts base path: %s", artifactPath)
