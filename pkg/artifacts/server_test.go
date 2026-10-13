@@ -230,6 +230,42 @@ func TestDownloadArtifactFile(t *testing.T) {
 	assert.Equal("content", string(data))
 }
 
+func TestLocalArtifactsSummaryPageRendersStyledTable(t *testing.T) {
+	root := t.TempDir()
+	artifactPath := filepath.Join(root, "12345", "build", "build.zip")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("zip data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	otherArtifactPath := filepath.Join(root, "99999", "other-artifact", "other-artifact.zip")
+	if err := os.MkdirAll(filepath.Dir(otherArtifactPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherArtifactPath, []byte("other zip data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/local-artifacts/summary?runId=12345", nil)
+	recorder := httptest.NewRecorder()
+	localArtifactsSummaryPage(root, recorder, req)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Header().Get("Content-Type"), "text/html")
+	body := recorder.Body.String()
+	assert.Contains(t, body, "border: 1px solid #d0d7de; border-radius: 6px;")
+	assert.Contains(t, body, "max-width: 900px;")
+	assert.Contains(t, body, "color: #24292f; text-decoration: none; cursor: pointer;")
+	assert.Contains(t, body, "path=12345%2Fbuild%2Fbuild.zip")
+	assert.Contains(t, body, "fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"")
+	assert.Contains(t, body, "flex-shrink: 0; min-width: 16px;")
+	assert.Contains(t, body, "data-copy-digest=\"sha256:")
+	assert.Contains(t, body, "sha256:")
+	assert.NotContains(t, body, "other-artifact")
+}
+
 type TestJobFileInfo struct {
 	workdir               string
 	workflowPath          string
