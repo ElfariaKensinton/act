@@ -469,6 +469,7 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 		downloadLocalArtifact(artifactPath, w, r)
 	})
 	router.GET("/local-artifacts/icon/:name", localArtifactIcon)
+	router.GET("/local-artifacts/summary.svg", localArtifactSummary)
 
 	logger.Infof("Artifacts base path: %s", artifactPath)
 	fsys := readWriteFSImpl{}
