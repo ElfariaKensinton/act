@@ -266,6 +266,19 @@ func TestLocalArtifactsSummaryPageRendersStyledTable(t *testing.T) {
 	assert.NotContains(t, body, "other-artifact")
 }
 
+func TestLocalArtifactPackageIconIsHollowAndFixedAt16px(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/local-artifacts/icon/package.svg", nil)
+	localArtifactIcon(recorder, request, httprouter.Params{{Key: "name", Value: "package.svg"}})
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "image/svg+xml", recorder.Header().Get("Content-Type"))
+	icon := recorder.Body.String()
+	assert.Contains(t, icon, "width=\"16\" height=\"16\" fill=\"none\" stroke=\"#57606a\"")
+	assert.Contains(t, icon, "stroke-width=\"1.5\"")
+	assert.Contains(t, icon, "M1.75 4.75L8 1.5L14.25 4.75V11.25L8 14.5L1.75 11.25V4.75Z")
+}
+
 type TestJobFileInfo struct {
 	workdir               string
 	workflowPath          string
