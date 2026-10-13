@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"html/template"
 	"io"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -404,6 +406,20 @@ func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request
 		http.Error(w, "invalid artifact path", http.StatusBadRequest)
 		return
 	}
+
+	// Actions.Results uses opaque workflow-run backend IDs. Artifact storage maps
+	// those IDs to signed int64 FNV-1a directory names. Accept either that stored
+	// directory name or the original backend ID in the download URL.
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) >= 3 {
+		if _, err := strconv.ParseInt(parts[0], 10, 64); err != nil {
+			hash := fnv.New64a()
+			_, _ = hash.Write([]byte(parts[0]))
+			parts[0] = fmt.Sprint(int64(hash.Sum64()))
+			rel = filepath.Clean(filepath.FromSlash(strings.Join(parts, "/")))
+		}
+	}
+
 	full := filepath.Join(root, rel)
 	within, err := filepath.Rel(root, full)
 	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(os.PathSeparator)) {
