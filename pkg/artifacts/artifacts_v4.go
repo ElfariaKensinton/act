@@ -82,7 +82,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
+	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -91,6 +92,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,18 +135,30 @@ func (c ArtifactContext) JSON(status int, _ ...interface{}) {
 	c.Resp.WriteHeader(status)
 }
 
-// validateRunIDV4 accepts any non-empty run id. GitHub-hosted runners send
-// workflow_run_backend_id as a GUID, not a number, so it must not be parsed as
-// an integer. The value is only ever used as a directory name (through
-// safeResolve) and inside the signed url.
-func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, string, bool) {
-	runID := strings.TrimSpace(rawRunID)
-	if runID == "" {
+func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, int64, bool) {
+	// The Results API sends workflow_run_backend_id as a string. GitHub-hosted
+	// IDs are often numeric, but compatible services may use opaque IDs (for
+	// example UUIDs). Preserve the legacy numeric directory layout and map
+	// opaque IDs to a stable, filesystem-safe numeric key.
+	if rawRunID == "" {
 		log.Error("Error runID is empty")
-		ctx.Error(http.StatusBadRequest, "run-id is empty")
-		return nil, "", false
+		ctx.Error(http.StatusBadRequest, "workflow_run_backend_id is required")
+		return nil, 0, false
 	}
-	return nil, runID, true
+	return nil, runKeyFromBackendID(rawRunID), true
+}
+
+// runKeyFromBackendID maps a workflow_run_backend_id to the numeric key that is
+// used as the run directory name: numeric IDs are kept, opaque IDs (GUIDs) are
+// mapped to a stable FNV-1a hash. Runners link to artifacts with the same rule.
+func runKeyFromBackendID(rawRunID string) int64 {
+	runID, err := strconv.ParseInt(rawRunID, 10, 64)
+	if err != nil {
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(rawRunID))
+		runID = int64(h.Sum64())
+	}
+	return runID
 }
 
 func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS) {
@@ -155,7 +169,7 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 		prefix:  ArtifactV4RouteBase,
 	}
 	router.POST(path.Join(ArtifactV4RouteBase, "CreateArtifact"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.createArtifact(&ArtifactContext{
 			Req:  r,
 			Resp: w,
@@ -174,14 +188,14 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 		})
 	})
 	router.POST(path.Join(ArtifactV4RouteBase, "GetSignedArtifactURL"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.getSignedArtifactURL(&ArtifactContext{
 			Req:  r,
 			Resp: w,
 		})
 	})
 	router.POST(path.Join(ArtifactV4RouteBase, "DeleteArtifact"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		route.AppURL = r.Host
+		route.AppURL = requestBaseURL(r)
 		route.deleteArtifact(&ArtifactContext{
 			Req:  r,
 			Resp: w,
@@ -201,40 +215,44 @@ func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS
 	})
 }
 
-func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, taskID string) []byte {
+func (r artifactV4Routes) buildSignature(endp, expires, artifactName string, taskID int64) []byte {
 	mac := hmac.New(sha256.New, []byte{0xba, 0xdb, 0xee, 0xf0})
 	mac.Write([]byte(endp))
 	mac.Write([]byte(expires))
 	mac.Write([]byte(artifactName))
-	mac.Write([]byte(taskID))
+	mac.Write([]byte(fmt.Sprint(taskID)))
 	return mac.Sum(nil)
 }
 
-func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID string) string {
+func (r artifactV4Routes) buildArtifactURL(endp, artifactName string, taskID int64) string {
 	expires := time.Now().Add(60 * time.Minute).Format("2006-01-02 15:04:05.999999999 -0700 MST")
-	uploadURL := "http://" + strings.TrimSuffix(r.AppURL, "/") + strings.TrimSuffix(r.prefix, "/") +
-		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + url.QueryEscape(taskID)
-	return uploadURL
+	baseURL := strings.TrimSuffix(r.AppURL, "/")
+	if baseURL == "" {
+		baseURL = "http://localhost"
+	}
+	return baseURL + strings.TrimSuffix(r.prefix, "/") +
+		"/" + endp + "?sig=" + base64.URLEncoding.EncodeToString(r.buildSignature(endp, expires, artifactName, taskID)) + "&expires=" + url.QueryEscape(expires) + "&artifactName=" + url.QueryEscape(artifactName) + "&taskID=" + fmt.Sprint(taskID)
 }
 
-func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (string, string, bool) {
-	taskID := ctx.Req.URL.Query().Get("taskID")
+func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (int64, string, bool) {
+	rawTaskID := ctx.Req.URL.Query().Get("taskID")
 	sig := ctx.Req.URL.Query().Get("sig")
 	expires := ctx.Req.URL.Query().Get("expires")
 	artifactName := ctx.Req.URL.Query().Get("artifactName")
 	dsig, _ := base64.URLEncoding.DecodeString(sig)
+	taskID, _ := strconv.ParseInt(rawTaskID, 10, 64)
 
 	expecedsig := r.buildSignature(endp, expires, artifactName, taskID)
 	if !hmac.Equal(dsig, expecedsig) {
 		log.Error("Error unauthorized")
 		ctx.Error(http.StatusUnauthorized, "Error unauthorized")
-		return "", "", false
+		return -1, "", false
 	}
 	t, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", expires)
 	if err != nil || t.Before(time.Now()) {
 		log.Error("Error link expired")
 		ctx.Error(http.StatusUnauthorized, "Error link expired")
-		return "", "", false
+		return -1, "", false
 	}
 	return taskID, artifactName, true
 }
@@ -284,11 +302,17 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 	file, err := r.fs.OpenWritable(safePath)
-
 	if err != nil {
-		panic(err)
+		log.Errorf("CreateArtifact could not prepare storage: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, artifactName, safePath, err)
+		ctx.Error(http.StatusInternalServerError, "could not prepare artifact storage")
+		return
 	}
-	file.Close()
+	if err := file.Close(); err != nil {
+		log.Errorf("CreateArtifact could not close storage: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, artifactName, safePath, err)
+		ctx.Error(http.StatusInternalServerError, "could not prepare artifact storage")
+		return
+	}
+	log.Infof("Artifact upload initialized: run_id=%q artifact=%q path=%q", req.WorkflowRunBackendId, artifactName, safePath)
 
 	respData := CreateArtifactResponse{
 		Ok:              true,
@@ -297,44 +321,222 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	r.sendProtbufBody(ctx, &respData)
 }
 
+type artifactBlockListXML struct {
+	IDs []string
+}
+
+// UnmarshalXML keeps the order of IDs from Azure's block-list document. Actions
+// artifacts can retry a block upload, so each block must be staged by block ID
+// and assembled only when the block list is committed.
+func (b *artifactBlockListXML) UnmarshalXML(decoder *xml.Decoder, start xml.StartElement) error {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		switch item := token.(type) {
+		case xml.StartElement:
+			switch item.Name.Local {
+			case "Latest", "Uncommitted", "Committed":
+				var id string
+				if err := decoder.DecodeElement(&id, &item); err != nil {
+					return err
+				}
+				if id = strings.TrimSpace(id); id != "" {
+					b.IDs = append(b.IDs, id)
+				}
+			default:
+				if err := decoder.Skip(); err != nil {
+					return err
+				}
+			}
+		case xml.EndElement:
+			if item.Name == start.Name {
+				return nil
+			}
+		}
+	}
+}
+
+func artifactV4ZipPath(baseDir string, taskID int64, artifactName string) string {
+	runPath := safeResolve(baseDir, fmt.Sprint(taskID))
+	artifactPath := safeResolve(runPath, artifactName)
+	return safeResolve(artifactPath, artifactName+".zip")
+}
+
+func artifactV4BlockDir(baseDir string, taskID int64, artifactName string) string {
+	runPath := safeResolve(baseDir, fmt.Sprint(taskID))
+	artifactPath := safeResolve(runPath, artifactName)
+	return safeResolve(artifactPath, ".blocks")
+}
+
+func artifactV4BlockPath(baseDir string, taskID int64, artifactName, blockID string) string {
+	// Hash the opaque block ID rather than using it as a filesystem path.
+	sum := sha256.Sum256([]byte(blockID))
+	return safeResolve(artifactV4BlockDir(baseDir, taskID, artifactName), hex.EncodeToString(sum[:])+".block")
+}
+
+type artifactRemover interface {
+	RemoveAll(string) error
+}
+
+func (r *artifactV4Routes) commitBlockList(ctx *ArtifactContext, taskID int64, artifactName string, blockIDs []string) {
+	if len(blockIDs) == 0 {
+		log.Errorf("Artifact block list is empty: task=%d artifact=%q", taskID, artifactName)
+		ctx.Error(http.StatusBadRequest, "empty artifact block list")
+		return
+	}
+
+	blockFiles := make([]fs.File, 0, len(blockIDs))
+	for _, blockID := range blockIDs {
+		blockPath := artifactV4BlockPath(r.baseDir, taskID, artifactName, blockID)
+		file, err := r.rfs.Open(blockPath)
+		if err != nil {
+			for _, opened := range blockFiles {
+				_ = opened.Close()
+			}
+			log.Errorf("Artifact block missing: task=%d artifact=%q block_id=%q: %v", taskID, artifactName, blockID, err)
+			ctx.Error(http.StatusBadRequest, "artifact block missing")
+			return
+		}
+		blockFiles = append(blockFiles, file)
+	}
+	defer func() {
+		for _, file := range blockFiles {
+			_ = file.Close()
+		}
+	}()
+
+	zipPath := artifactV4ZipPath(r.baseDir, taskID, artifactName)
+	output, err := r.fs.OpenWritable(zipPath)
+	if err != nil {
+		log.Errorf("Artifact block commit could not prepare file: task=%d artifact=%q: %v", taskID, artifactName, err)
+		ctx.Error(http.StatusInternalServerError, "could not prepare artifact file")
+		return
+	}
+
+	var total int64
+	for i, block := range blockFiles {
+		n, copyErr := io.Copy(output, block)
+		total += n
+		if copyErr != nil {
+			_ = output.Close()
+			log.Errorf("Artifact block commit failed: task=%d artifact=%q block_index=%d: %v", taskID, artifactName, i, copyErr)
+			ctx.Error(http.StatusInternalServerError, "artifact block commit failed")
+			return
+		}
+	}
+	if err := output.Close(); err != nil {
+		log.Errorf("Artifact block commit close failed: task=%d artifact=%q: %v", taskID, artifactName, err)
+		ctx.Error(http.StatusInternalServerError, "artifact block commit failed")
+		return
+	}
+
+	// Close staged block files before removing the temporary directory. This
+	// also permits cleanup on platforms that do not allow deleting open files.
+	for _, block := range blockFiles {
+		if err := block.Close(); err != nil {
+			log.Warnf("Artifact block close after commit failed: task=%d artifact=%q: %v", taskID, artifactName, err)
+		}
+	}
+	blockFiles = nil
+	if remover, ok := r.fs.(artifactRemover); ok {
+		_ = remover.RemoveAll(artifactV4BlockDir(r.baseDir, taskID, artifactName))
+	}
+	log.Infof("Artifact upload blocks committed: task=%d artifact=%q blocks=%d bytes=%d", taskID, artifactName, len(blockIDs), total)
+	ctx.JSON(http.StatusCreated, "created")
+}
+
 func (r *artifactV4Routes) uploadArtifact(ctx *ArtifactContext) {
 	task, artifactName, ok := r.verifySignature(ctx, "UploadArtifact")
 	if !ok {
 		return
 	}
 
-	comp := ctx.Req.URL.Query().Get("comp")
+	comp := strings.ToLower(ctx.Req.URL.Query().Get("comp"))
 	switch comp {
-	case "block", "appendBlock":
-
-		safeRunPath := safeResolve(r.baseDir, fmt.Sprint(task))
-		safePath := safeResolve(safeRunPath, artifactName)
-		safePath = safeResolve(safePath, artifactName+".zip")
-
-		file, err := r.fs.OpenAppendable(safePath)
-
+	case "block":
+		blockID := ctx.Req.URL.Query().Get("blockid")
+		if blockID == "" {
+			ctx.Error(http.StatusBadRequest, "blockid is required")
+			return
+		}
+		// A block ID is an idempotency key. Repeated uploads of the same block
+		// must replace it, not append the retried body after a partial upload.
+		blockPath := artifactV4BlockPath(r.baseDir, task, artifactName, blockID)
+		file, err := r.fs.OpenWritable(blockPath)
 		if err != nil {
-			panic(err)
+			log.Errorf("Artifact block upload could not prepare storage: task=%d artifact=%q: %v", task, artifactName, err)
+			ctx.Error(http.StatusInternalServerError, "could not prepare artifact block")
+			return
 		}
-		defer file.Close()
-
-		writer, ok := file.(io.Writer)
-		if !ok {
-			panic(errors.New("File is not writable"))
-		}
-
 		if ctx.Req.Body == nil {
-			panic(errors.New("No body given"))
+			_ = file.Close()
+			ctx.Error(http.StatusBadRequest, "no body given")
+			return
 		}
-
-		_, err = io.Copy(writer, ctx.Req.Body)
+		n, copyErr := io.Copy(file, ctx.Req.Body)
+		closeErr := file.Close()
+		if copyErr != nil {
+			log.Errorf("Artifact block upload failed: task=%d artifact=%q comp=%q block_id=%q bytes_received=%d content_length=%d remote=%q user_agent=%q: %v",
+				task, artifactName, comp, blockID, n, ctx.Req.ContentLength, ctx.Req.RemoteAddr, ctx.Req.UserAgent(), copyErr)
+			ctx.Error(http.StatusInternalServerError, "artifact block upload failed")
+			return
+		}
+		if closeErr != nil {
+			log.Errorf("Artifact block upload close failed: task=%d artifact=%q block_id=%q: %v", task, artifactName, blockID, closeErr)
+			ctx.Error(http.StatusInternalServerError, "artifact block upload failed")
+			return
+		}
+		log.Infof("Artifact block stored: task=%d artifact=%q block_id=%q bytes=%d content_length=%d",
+			task, artifactName, blockID, n, ctx.Req.ContentLength)
+		ctx.JSON(http.StatusCreated, "appended")
+	case "appendblock":
+		// Retain support for clients using append-block semantics.
+		zipPath := artifactV4ZipPath(r.baseDir, task, artifactName)
+		file, err := r.fs.OpenAppendable(zipPath)
 		if err != nil {
-			panic(err)
+			log.Errorf("Artifact append-block upload could not prepare storage: task=%d artifact=%q: %v", task, artifactName, err)
+			ctx.Error(http.StatusInternalServerError, "could not prepare artifact file")
+			return
 		}
-		file.Close()
+		if ctx.Req.Body == nil {
+			_ = file.Close()
+			ctx.Error(http.StatusBadRequest, "no body given")
+			return
+		}
+		n, copyErr := io.Copy(file, ctx.Req.Body)
+		closeErr := file.Close()
+		if copyErr != nil {
+			log.Errorf("Artifact append-block upload failed: task=%d artifact=%q bytes_received=%d content_length=%d remote=%q: %v",
+				task, artifactName, n, ctx.Req.ContentLength, ctx.Req.RemoteAddr, copyErr)
+			ctx.Error(http.StatusInternalServerError, "artifact append-block upload failed")
+			return
+		}
+		if closeErr != nil {
+			log.Errorf("Artifact append-block close failed: task=%d artifact=%q: %v", task, artifactName, closeErr)
+			ctx.Error(http.StatusInternalServerError, "artifact append-block upload failed")
+			return
+		}
+		log.Infof("Artifact append block stored: task=%d artifact=%q bytes=%d", task, artifactName, n)
 		ctx.JSON(http.StatusCreated, "appended")
 	case "blocklist":
-		ctx.JSON(http.StatusCreated, "created")
+		body, err := io.ReadAll(ctx.Req.Body)
+		if err != nil {
+			log.Errorf("Artifact block list read failed: task=%d artifact=%q: %v", task, artifactName, err)
+			ctx.Error(http.StatusInternalServerError, "could not read artifact block list")
+			return
+		}
+		var blockList artifactBlockListXML
+		if err := xml.Unmarshal(body, &blockList); err != nil {
+			log.Errorf("Artifact block list decode failed: task=%d artifact=%q: %v", task, artifactName, err)
+			ctx.Error(http.StatusBadRequest, "invalid artifact block list")
+			return
+		}
+		r.commitBlockList(ctx, task, artifactName, blockList.IDs)
+	default:
+		log.Errorf("Unsupported artifact upload operation: comp=%q path=%s", ctx.Req.URL.Query().Get("comp"), ctx.Req.URL.Path)
+		ctx.Error(http.StatusBadRequest, "unsupported artifact upload operation")
 	}
 }
 
@@ -344,9 +546,26 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
 	if ok := r.parseProtbufBody(ctx, &req); !ok {
 		return
 	}
-	_, _, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
+	_, runID, ok := validateRunIDV4(ctx, req.WorkflowRunBackendId)
 	if !ok {
 		return
+	}
+
+	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(runID))
+	safePath := safeResolve(safeRunPath, req.Name)
+	safePath = safeResolve(safePath, req.Name+".zip")
+	file, err := r.rfs.Open(safePath)
+	if err != nil {
+		log.Errorf("Artifact finalize failed: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, req.Name, safePath, err)
+		ctx.Error(http.StatusNotFound, "uploaded artifact file not found")
+		return
+	}
+	info, statErr := file.Stat()
+	_ = file.Close()
+	if statErr != nil {
+		log.Errorf("Artifact finalize could not stat file: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, req.Name, safePath, statErr)
+	} else {
+		log.Infof("Artifact upload finalized: run_id=%q artifact=%q stored_bytes=%d declared_size=%d", req.WorkflowRunBackendId, req.Name, info.Size(), req.Size)
 	}
 
 	respData := FinalizeArtifactResponse{
@@ -355,7 +574,6 @@ func (r *artifactV4Routes) finalizeArtifact(ctx *ArtifactContext) {
 	}
 	r.sendProtbufBody(ctx, &respData)
 }
-
 func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
 	var req ListArtifactsRequest
 
