@@ -400,6 +400,23 @@ func artifactNameLabelSVG(w http.ResponseWriter, req *http.Request) {
 		width, width, escapedName)
 }
 
+func isOpaqueWorkflowRunBackendID(value string) bool {
+	// The Actions.Results backend ID is a UUID. Leave ordinary local run keys
+	// (for example "run-123") untouched so existing download URLs remain valid.
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
+}
+
 func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request) {
 	rel := filepath.Clean(filepath.FromSlash(req.URL.Query().Get("path")))
 	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
@@ -411,13 +428,11 @@ func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request
 	// those IDs to signed int64 FNV-1a directory names. Accept either that stored
 	// directory name or the original backend ID in the download URL.
 	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) >= 3 {
-		if _, err := strconv.ParseInt(parts[0], 10, 64); err != nil {
-			hash := fnv.New64a()
-			_, _ = hash.Write([]byte(parts[0]))
-			parts[0] = fmt.Sprint(int64(hash.Sum64()))
-			rel = filepath.Clean(filepath.FromSlash(strings.Join(parts, "/")))
-		}
+	if len(parts) >= 3 && isOpaqueWorkflowRunBackendID(parts[0]) {
+		hash := fnv.New64a()
+		_, _ = hash.Write([]byte(parts[0]))
+		parts[0] = fmt.Sprint(int64(hash.Sum64()))
+		rel = filepath.Clean(filepath.FromSlash(strings.Join(parts, "/")))
 	}
 
 	full := filepath.Join(root, rel)
