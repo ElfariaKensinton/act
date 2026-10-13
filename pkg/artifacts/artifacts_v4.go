@@ -145,13 +145,20 @@ func validateRunIDV4(ctx *ArtifactContext, rawRunID string) (interface{}, int64,
 		ctx.Error(http.StatusBadRequest, "workflow_run_backend_id is required")
 		return nil, 0, false
 	}
+	return nil, runKeyFromBackendID(rawRunID), true
+}
+
+// runKeyFromBackendID maps a workflow_run_backend_id to the numeric key that is
+// used as the run directory name: numeric IDs are kept, opaque IDs (GUIDs) are
+// mapped to a stable FNV-1a hash. Runners link to artifacts with the same rule.
+func runKeyFromBackendID(rawRunID string) int64 {
 	runID, err := strconv.ParseInt(rawRunID, 10, 64)
 	if err != nil {
 		h := fnv.New64a()
 		_, _ = h.Write([]byte(rawRunID))
 		runID = int64(h.Sum64())
 	}
-	return nil, runID, true
+	return runID
 }
 
 func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS) {
