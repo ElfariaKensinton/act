@@ -244,7 +244,6 @@ func (r artifactV4Routes) verifySignature(ctx *ArtifactContext, endp string) (in
 	// and use RawURLEncoding so padded and unpadded signatures are both accepted.
 	dsig, _ := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig, "="))
 	taskID, _ := strconv.ParseInt(rawTaskID, 10, 64)
-	taskID, _ := strconv.ParseInt(rawTaskID, 10, 64)
 
 	expecedsig := r.buildSignature(endp, expires, artifactName, taskID)
 	if !hmac.Equal(dsig, expecedsig) {
