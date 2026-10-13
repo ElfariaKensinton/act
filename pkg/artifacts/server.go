@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"html/template"
 	"io"
 	"io/fs"
@@ -382,38 +381,25 @@ func localArtifactsPage(root string, w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// artifactNameLabelSVG serves a simple SVG text label for GitHub job summaries.
- // Rendering the artifact name as an image avoids GitHub's Markdown sanitizer removing
- // inline CSS from links, which otherwise leaves filenames blue and underlined.
-func artifactNameLabelSVG(w http.ResponseWriter, req *http.Request) {
-	name := strings.TrimSpace(req.URL.Query().Get("name"))
-	if name == "" {
-		name = "artifact"
-	}
-	width := len([]rune(name))*9 + 6
-	escapedName := template.HTMLEscapeString(name)
-	w.Header().Set("Content-Type", "image/svg+xml; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = fmt.Fprintf(w,
-		`<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="18" viewBox="0 0 %d 18"><text x="0" y="13" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" fill="#000">%s</text></svg>`,
-		width, width, escapedName)
+// localArtifactIcons are Primer Octicons (16px) used by the job summary table
+// that the runner writes. GitHub renders summary images through its image proxy,
+// which needs a public URL that answers with an image content type.
+var localArtifactIcons = map[string]string{
+	"package":  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="#59636e"><path d="M8.878.392a1.75 1.75 0 0 0-1.756 0l-5.25 3.045A1.75 1.75 0 0 0 1 4.951v6.098c0 .624.332 1.2.872 1.514l5.25 3.045a1.75 1.75 0 0 0 1.756 0l5.25-3.045c.54-.313.872-.89.872-1.514V4.951c0-.624-.332-1.2-.872-1.514ZM7.875 1.69a.25.25 0 0 1 .25 0l4.63 2.685L8 7.133 3.245 4.375ZM2.5 5.677v5.372c0 .09.047.171.125.216l4.625 2.683V8.432Zm6.25 8.271 4.625-2.683a.25.25 0 0 0 .125-.216V5.677L8.75 8.432Z"/></svg>`,
+	"copy":     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="#0969da"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>`,
+	"download": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="#59636e"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/><path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.969a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.78a.749.749 0 1 1 1.06-1.06l1.97 1.969Z"/></svg>`,
+	"trash":    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="#59636e"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z"/></svg>`,
 }
 
-func isOpaqueWorkflowRunBackendID(value string) bool {
-	// The Actions.Results backend ID is a UUID. Leave ordinary local run keys
-	// (for example "run-123") untouched so existing download URLs remain valid.
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
+func localArtifactIcon(w http.ResponseWriter, _ *http.Request, ps httprouter.Params) {
+	svg, ok := localArtifactIcons[strings.TrimSuffix(ps.ByName("name"), ".svg")]
+	if !ok {
+		http.Error(w, "icon not found", http.StatusNotFound)
+		return
 	}
-	for i, r := range value {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			continue
-		}
-		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
-			return false
-		}
-	}
-	return true
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	_, _ = w.Write([]byte(svg))
 }
 
 func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request) {
@@ -423,17 +409,6 @@ func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	// Actions.Results uses opaque workflow-run backend IDs. Artifact storage maps
-	// those IDs to signed int64 FNV-1a directory names. Accept either that stored
-	// directory name or the original backend ID in the download URL.
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) >= 3 && isOpaqueWorkflowRunBackendID(parts[0]) {
-		hash := fnv.New64a()
-		_, _ = hash.Write([]byte(parts[0]))
-		parts[0] = fmt.Sprint(int64(hash.Sum64()))
-		rel = filepath.Clean(filepath.FromSlash(strings.Join(parts, "/")))
-	}
-
 	full := filepath.Join(root, rel)
 	within, err := filepath.Rel(root, full)
 	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(os.PathSeparator)) {
@@ -441,6 +416,17 @@ func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request
 		return
 	}
 	file, err := os.Open(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		// Runners that link with the raw workflow_run_backend_id (a GUID) do not match
+		// the hashed run directory the v4 server stores artifacts under.
+		if parts := strings.SplitN(filepath.ToSlash(rel), "/", 2); len(parts) == 2 && parts[0] != "" {
+			alt := filepath.Join(root, fmt.Sprint(runKeyFromBackendID(parts[0])), filepath.FromSlash(parts[1]))
+			if within, relErr := filepath.Rel(root, alt); relErr == nil && within != ".." && !strings.HasPrefix(within, ".."+string(os.PathSeparator)) {
+				file, err = os.Open(alt)
+				full = alt
+			}
+		}
+	}
 	if err != nil {
 		http.Error(w, "artifact not found", http.StatusNotFound)
 		return
@@ -482,9 +468,7 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 	router.GET("/local-artifacts/download", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		downloadLocalArtifact(artifactPath, w, r)
 	})
-	router.GET("/local-artifacts/name.svg", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		artifactNameLabelSVG(w, r)
-	})
+	router.GET("/local-artifacts/icon/:name", localArtifactIcon)
 
 	logger.Infof("Artifacts base path: %s", artifactPath)
 	fsys := readWriteFSImpl{}
