@@ -645,6 +645,7 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string, o
 		localArtifactsSummaryPage(artifactPath, w, r)
 	})
 	router.GET("/local-artifacts/icon/:name", localArtifactIcon)
+	router.GET("/local-artifacts/name.svg", localArtifactNameLabel)
 
 	logger.Infof("Artifacts base path: %s", artifactPath)
 	fsys := readWriteFSImpl{}

@@ -41,6 +41,12 @@ styles and classes. Its native Artifacts card cannot be reproduced exactly in a
 custom job summary by changing either repository. Artifact names in the existing
 summary remain download links.
 
+Artifact-name labels in the summary are served as black SVG text from
+`/local-artifacts/name.svg?name=...`. The runner wraps each image in the original
+download link, keeping the name black and free of link underlines after GitHub
+sanitizes the HTML. Like the existing icon URLs, the image endpoint must be
+reachable by GitHub's image proxy. Update both the server and runner together.
+
 The server listens on localhost by default. To make it reachable by a GitHub-hosted or remote self-hosted runner, put it behind an HTTPS reverse proxy or a private overlay network and configure the runner's `ACTIONS_ARTIFACTS_RESULTS_URL_OVERRIDE` to the public base URL, including the trailing slash.
 
 **Compatibility and security:** the existing implementation is a protocol starting point, not yet certified against `actions/upload-artifact@v7`. Test uploads and downloads with non-sensitive data before relying on it. Do not expose the service directly to the public internet: add network access controls and HTTPS, and review the implementation's signed-URL/authentication behavior before storing private artifacts. The runner override redirects the Results API endpoint only; it does not move GitHub's run metadata or artifact listing UI to this server.
