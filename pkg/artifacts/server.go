@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/julienschmidt/httprouter"
@@ -382,7 +383,6 @@ func localArtifactsPage(root string, w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-
 type localArtifactSummaryRow struct {
 	Name         string
 	RelativePath string
@@ -584,7 +584,12 @@ func downloadLocalArtifact(root string, w http.ResponseWriter, req *http.Request
 	http.ServeContent(w, req, filepath.Base(full), info.ModTime(), file)
 }
 
-func Serve(ctx context.Context, artifactPath string, addr string, port string) context.CancelFunc {
+type ServeOptions struct {
+	// RetentionDays applies when an upload does not supply its own expiration.
+	RetentionDays int
+}
+
+func Serve(ctx context.Context, artifactPath string, addr string, port string, options ...ServeOptions) context.CancelFunc {
 	serverContext, cancel := context.WithCancel(ctx)
 	logger := common.Logger(serverContext)
 
@@ -598,6 +603,33 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 		return cancel
 	}
 	artifactPath = absoluteArtifactPath
+	retentionDays := defaultRetentionDays
+	if len(options) > 0 && options[0].RetentionDays > 0 {
+		retentionDays = options[0].RetentionDays
+	}
+
+	// Cleanup must not remove a file while a request is uploading or reading it.
+	var storageMu sync.RWMutex
+	cleanup := func() {
+		storageMu.Lock()
+		defer storageMu.Unlock()
+		if err := cleanupExpiredArtifacts(artifactPath, retentionDays, time.Now()); err != nil {
+			logger.Errorf("Artifact expiration cleanup failed: %v", err)
+		}
+	}
+	cleanup()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serverContext.Done():
+				return
+			case <-ticker.C:
+				cleanup()
+			}
+		}
+	}()
 
 	router := httprouter.New()
 	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
@@ -618,12 +650,16 @@ func Serve(ctx context.Context, artifactPath string, addr string, port string) c
 	fsys := readWriteFSImpl{}
 	uploads(router, artifactPath, fsys)
 	downloads(router, artifactPath, fsys)
-	RoutesV4(router, artifactPath, fsys, fsys)
+	RoutesV4(router, artifactPath, fsys, fsys, retentionDays)
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%s", addr, port),
 		ReadHeaderTimeout: 2 * time.Second,
-		Handler:           router,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			storageMu.RLock()
+			defer storageMu.RUnlock()
+			router.ServeHTTP(w, r)
+		}),
 	}
 
 	// run server

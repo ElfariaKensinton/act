@@ -84,6 +84,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -109,11 +110,12 @@ const (
 )
 
 type artifactV4Routes struct {
-	prefix  string
-	fs      WriteFS
-	rfs     fs.FS
-	AppURL  string
-	baseDir string
+	prefix        string
+	fs            WriteFS
+	rfs           fs.FS
+	AppURL        string
+	baseDir       string
+	retentionDays int
 }
 
 type ArtifactContext struct {
@@ -161,12 +163,17 @@ func runKeyFromBackendID(rawRunID string) int64 {
 	return runID
 }
 
-func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS) {
+func RoutesV4(router *httprouter.Router, baseDir string, fsys WriteFS, rfs fs.FS, retentionDays ...int) {
+	days := defaultRetentionDays
+	if len(retentionDays) > 0 && retentionDays[0] > 0 {
+		days = retentionDays[0]
+	}
 	route := &artifactV4Routes{
-		fs:      fsys,
-		rfs:     rfs,
-		baseDir: baseDir,
-		prefix:  ArtifactV4RouteBase,
+		fs:            fsys,
+		rfs:           rfs,
+		baseDir:       baseDir,
+		prefix:        ArtifactV4RouteBase,
+		retentionDays: days,
 	}
 	router.POST(path.Join(ArtifactV4RouteBase, "CreateArtifact"), func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		route.AppURL = requestBaseURL(r)
@@ -303,6 +310,20 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	}
 
 	artifactName := req.Name
+	days := r.retentionDays
+	if days <= 0 {
+		days = defaultRetentionDays
+	}
+	expiresAt := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+	if req.ExpiresAt != nil {
+		if err := req.ExpiresAt.CheckValid(); err != nil || !req.ExpiresAt.AsTime().After(time.Now()) {
+			ctx.Error(http.StatusBadRequest, "expires_at must be a valid future timestamp")
+			return
+		}
+		// The patched runner supplies the repository's retention through the
+		// official upload action. A CLI value is only a fallback for other clients.
+		expiresAt = req.ExpiresAt.AsTime()
+	}
 
 	safeRunPath := safeResolve(r.baseDir, fmt.Sprint(runID))
 	safePath := safeResolve(safeRunPath, artifactName)
@@ -316,6 +337,11 @@ func (r *artifactV4Routes) createArtifact(ctx *ArtifactContext) {
 	if err := file.Close(); err != nil {
 		log.Errorf("CreateArtifact could not close storage: run_id=%q artifact=%q path=%q: %v", req.WorkflowRunBackendId, artifactName, safePath, err)
 		ctx.Error(http.StatusInternalServerError, "could not prepare artifact storage")
+		return
+	}
+	if err := writeArtifactRetention(r.fs, safePath, expiresAt); err != nil {
+		log.Errorf("CreateArtifact could not save retention: %v", err)
+		ctx.Error(http.StatusInternalServerError, "could not save artifact retention")
 		return
 	}
 	log.Infof("Artifact upload initialized: run_id=%q artifact=%q path=%q", req.WorkflowRunBackendId, artifactName, safePath)
@@ -594,7 +620,7 @@ func (r *artifactV4Routes) listArtifacts(ctx *ArtifactContext) {
 	safePath := safeResolve(r.baseDir, fmt.Sprint(runID))
 
 	entries, err := fs.ReadDir(r.rfs, safePath)
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		panic(err)
 	}
 
@@ -654,7 +680,12 @@ func (r *artifactV4Routes) downloadArtifact(ctx *ArtifactContext) {
 	safePath := safeResolve(safeRunPath, artifactName)
 	safePath = safeResolve(safePath, artifactName+".zip")
 
-	file, _ := r.rfs.Open(safePath)
+	file, err := r.rfs.Open(safePath)
+	if err != nil {
+		ctx.Error(http.StatusNotFound, "artifact not found")
+		return
+	}
+	defer file.Close()
 
 	_, _ = io.Copy(ctx.Resp, file)
 }
